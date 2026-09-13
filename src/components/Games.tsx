@@ -6,10 +6,35 @@ const INITIAL_VISIBLE_COUNT = 4;
 const LOAD_MORE_STEP = 4;
 
 /**
- * Renders an itch.io embed iframe only once the card scrolls into the
- * viewport. Loading too many embeds at once triggers itch.io's rate
- * limiter (429 Too Many Requests), so we mount them lazily.
+ * itch.io rate-limits embed requests aggressively — even 2-3 fired at the
+ * same instant can trigger 429s. Simply lazy-loading on viewport-visibility
+ * isn't enough, because several cards can become visible at once.
+ *
+ * This queue forces embeds to load strictly one at a time, with a delay
+ * between each, no matter how many become visible simultaneously.
  */
+const EMBED_LOAD_DELAY_MS = 800;
+const embedLoadQueue: Array<() => void> = [];
+let isProcessingQueue = false;
+
+function enqueueEmbedLoad(callback: () => void) {
+  embedLoadQueue.push(callback);
+  if (!isProcessingQueue) {
+    processQueue();
+  }
+}
+
+function processQueue() {
+  isProcessingQueue = true;
+  const next = embedLoadQueue.shift();
+  if (!next) {
+    isProcessingQueue = false;
+    return;
+  }
+  next();
+  setTimeout(processQueue, EMBED_LOAD_DELAY_MS);
+}
+
 const LazyItchEmbed: React.FC<{ embedId: string; title: string; url: string }> = ({
   embedId,
   title,
@@ -17,6 +42,7 @@ const LazyItchEmbed: React.FC<{ embedId: string; title: string; url: string }> =
 }) => {
   const containerRef = useRef<HTMLDivElement>(null);
   const [shouldLoad, setShouldLoad] = useState(false);
+  const [status, setStatus] = useState<"waiting" | "loading" | "loaded">("waiting");
 
   useEffect(() => {
     const node = containerRef.current;
@@ -25,8 +51,9 @@ const LazyItchEmbed: React.FC<{ embedId: string; title: string; url: string }> =
     const observer = new IntersectionObserver(
       (entries) => {
         if (entries[0].isIntersecting) {
-          setShouldLoad(true);
           observer.disconnect();
+          setStatus("loading");
+          enqueueEmbedLoad(() => setShouldLoad(true));
         }
       },
       { rootMargin: "200px" }
@@ -46,11 +73,16 @@ const LazyItchEmbed: React.FC<{ embedId: string; title: string; url: string }> =
           width="100%"
           height="167"
           allowFullScreen
+          onLoad={() => setStatus("loaded")}
         >
           <a href={url}>{title}</a>
         </iframe>
       ) : (
-        <div className="game-embed-placeholder" style={{ height: 167 }} />
+        <div className="game-embed-placeholder" style={{ height: 167 }}>
+          {status === "loading" && (
+            <span className="game-embed-loading">Загрузка…</span>
+          )}
+        </div>
       )}
     </div>
   );
